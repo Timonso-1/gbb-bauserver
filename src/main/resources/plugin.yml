@@ -1,0 +1,14 @@
+name: gbb-bauserver
+version: '${version}'
+
+main: de.timonso.gbbBauserver.GbbBauserver
+api-version: '26.2'
+load: POSTWORLD
+
+authors: [ Timonso ]
+dependencies:
+  server:
+    CommandAPI:
+      load: BEFORE
+      required: true
+      join-classpath: true
