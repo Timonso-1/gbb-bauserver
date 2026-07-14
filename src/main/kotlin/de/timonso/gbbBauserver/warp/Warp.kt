@@ -11,5 +11,6 @@ data class Warp(
     val z: Double,
     val yaw: Float,
     val pitch: Float,
-    val creatorId: UUID
+    val creatorId: UUID,
+    val createdAt: Long
 )

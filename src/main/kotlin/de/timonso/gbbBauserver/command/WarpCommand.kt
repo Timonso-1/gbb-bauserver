@@ -1,5 +1,6 @@
 package de.timonso.gbbBauserver.command
 
+import de.timonso.gbbBauserver.util.Messages
 import de.timonso.gbbBauserver.warp.Warp
 import de.timonso.gbbBauserver.warp.WarpManager
 import dev.jorel.commandapi.arguments.Argument
@@ -9,10 +10,24 @@ import dev.jorel.commandapi.kotlindsl.greedyStringArgument
 import dev.jorel.commandapi.kotlindsl.literalArgument
 import dev.jorel.commandapi.kotlindsl.playerExecutor
 import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.event.ClickEvent
+import net.kyori.adventure.text.event.HoverEvent
 import net.kyori.adventure.text.format.NamedTextColor
 import org.bukkit.Bukkit
 import org.bukkit.Location
+import org.bukkit.Sound
 import org.bukkit.entity.Player
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.UUID
+
+private const val MAX_NAME_LENGTH = 32
+private val NAME_REGEX = Regex("[\\p{L}\\p{N} _-]+")
+private const val DELETE_CONFIRM_TIMEOUT_MS = 30_000L
+
+private val pendingDeletions = mutableMapOf<UUID, Pair<UUID, Long>>()
+private val dateFormat = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm").withZone(ZoneId.systemDefault())
 
 fun warpCommand(warpManager: WarpManager) = commandTree("warp") {
     withPermission("gbbbauserver.command.warp")
@@ -20,15 +35,20 @@ fun warpCommand(warpManager: WarpManager) = commandTree("warp") {
     literalArgument("create") {
         greedyStringArgument("name") {
             playerExecutor { player, arguments ->
-                val name = arguments["name"] as String
+                val name = (arguments["name"] as String).trim()
 
-                if (warpManager.getWarpByName(name) != null) {
-                    player.sendMessage(Component.text("Ein Warp mit dem Namen \"$name\" existiert bereits.", NamedTextColor.RED))
+                val error = validateName(name, warpManager)
+                if (error != null) {
+                    player.sendMessage(Messages.error(error))
                     return@playerExecutor
                 }
 
                 val warp = warpManager.createWarp(name, player)
-                player.sendMessage(Component.text("Warp \"${warp.name}\" wurde erstellt.", NamedTextColor.GREEN))
+                player.sendMessage(Messages.message(
+                    Component.text("Der Warp ")
+                        .append(Messages.highlight(warp.name))
+                        .append(Component.text(" wurde erstellt."))
+                ))
             }
         }
     }
@@ -38,21 +58,58 @@ fun warpCommand(warpManager: WarpManager) = commandTree("warp") {
             withWarp(warpManager) { player, warp ->
                 val world = Bukkit.getWorld(warp.worldId)
                 if (world == null) {
-                    player.sendMessage(Component.text("Die Welt des Warps \"${warp.name}\" ist nicht geladen.", NamedTextColor.RED))
+                    player.sendMessage(Messages.error(
+                        Component.text("Die Welt des Warps ")
+                            .append(Messages.highlight(warp.name))
+                            .append(Component.text(" ist nicht geladen."))
+                    ))
                     return@withWarp
                 }
 
-                player.teleportAsync(Location(world, warp.x, warp.y, warp.z, warp.yaw, warp.pitch))
-                player.sendMessage(Component.text("Du wurdest zum Warp \"${warp.name}\" teleportiert.", NamedTextColor.GREEN))
+                player.teleportAsync(Location(world, warp.x, warp.y, warp.z, warp.yaw, warp.pitch)).thenAccept { success ->
+                    if (!success) return@thenAccept
+                    player.playSound(player.location, Sound.ENTITY_ENDERMAN_TELEPORT, 1.0f, 1.0f)
+                    player.sendMessage(Messages.message(
+                        Component.text("Du wurdest zum Warp ")
+                            .append(Messages.highlight(warp.name))
+                            .append(Component.text(" teleportiert."))
+                    ))
+                }
             }
         }
     }
 
     literalArgument("delete") {
+        withPermission("gbbbauserver.command.warp.delete")
         warpNameArgument(warpManager) {
             withWarp(warpManager) { player, warp ->
+                val pending = pendingDeletions[player.uniqueId]
+                val confirmed = pending != null &&
+                    pending.first == warp.id &&
+                    System.currentTimeMillis() - pending.second <= DELETE_CONFIRM_TIMEOUT_MS
+
+                if (!confirmed) {
+                    pendingDeletions[player.uniqueId] = warp.id to System.currentTimeMillis()
+                    player.sendMessage(Messages.message(
+                        Component.text("Möchtest du den Warp ")
+                            .append(Messages.highlight(warp.name))
+                            .append(Component.text(" wirklich löschen? "))
+                            .append(
+                                Component.text("[Bestätigen]", NamedTextColor.RED)
+                                    .hoverEvent(HoverEvent.showText(Component.text("Klicke, um den Warp endgültig zu löschen", Messages.TEXT)))
+                                    .clickEvent(ClickEvent.runCommand("/warp delete ${warp.name}"))
+                            )
+                    ))
+                    return@withWarp
+                }
+
+                pendingDeletions.remove(player.uniqueId)
                 warpManager.deleteWarp(warp)
-                player.sendMessage(Component.text("Warp \"${warp.name}\" wurde gelöscht.", NamedTextColor.GREEN))
+                player.sendMessage(Messages.message(
+                    Component.text("Der Warp ")
+                        .append(Messages.highlight(warp.name))
+                        .append(Component.text(" wurde gelöscht."))
+                ))
             }
         }
     }
@@ -62,29 +119,76 @@ fun warpCommand(warpManager: WarpManager) = commandTree("warp") {
             withWarp(warpManager) { player, warp ->
                 val worldName = Bukkit.getWorld(warp.worldId)?.name ?: warp.worldId.toString()
                 val creatorName = Bukkit.getOfflinePlayer(warp.creatorId).name ?: warp.creatorId.toString()
+                val createdAt = if (warp.createdAt > 0) dateFormat.format(Instant.ofEpochMilli(warp.createdAt)) else "Unbekannt"
 
                 player.sendMessage(
                     Component.text()
-                        .append(Component.text("--- Warp \"${warp.name}\" ---", NamedTextColor.GOLD))
+                        .append(Messages.header("Warp: ${warp.name}"))
                         .appendNewline()
-                        .append(infoLine("ID", warp.id.toString()))
+                        .append(Messages.line("ID", warp.id.toString()))
                         .appendNewline()
-                        .append(infoLine("Welt", worldName))
+                        .append(Messages.line("Welt", worldName))
                         .appendNewline()
-                        .append(infoLine("Position", "%.1f, %.1f, %.1f".format(warp.x, warp.y, warp.z)))
+                        .append(Messages.line("Position", "%.1f, %.1f, %.1f".format(warp.x, warp.y, warp.z)))
                         .appendNewline()
-                        .append(infoLine("Blickrichtung", "Yaw %.1f, Pitch %.1f".format(warp.yaw, warp.pitch)))
+                        .append(Messages.line("Blickrichtung", "Yaw %.1f, Pitch %.1f".format(warp.yaw, warp.pitch)))
                         .appendNewline()
-                        .append(infoLine("Erstellt von", creatorName))
+                        .append(Messages.line("Erstellt von", creatorName))
+                        .appendNewline()
+                        .append(Messages.line("Erstellt am", createdAt))
+                        .appendNewline()
+                        .append(
+                            Component.text(" [Teleportieren]", NamedTextColor.GREEN)
+                                .hoverEvent(HoverEvent.showText(Component.text("Klicke, um dich zu diesem Warp zu teleportieren", Messages.TEXT)))
+                                .clickEvent(ClickEvent.runCommand("/warp teleport ${warp.name}"))
+                        )
                         .build()
                 )
             }
         }
     }
+
+    literalArgument("list") {
+        playerExecutor { player, _ ->
+            val warps = warpManager.getWarps().sortedBy { it.name.lowercase() }
+            if (warps.isEmpty()) {
+                player.sendMessage(Messages.message(Component.text("Es wurden noch keine Warps erstellt.")))
+                return@playerExecutor
+            }
+
+            val message = Component.text().append(Messages.header("Warps (${warps.size})"))
+            for (warp in warps) {
+                val worldName = Bukkit.getWorld(warp.worldId)?.name ?: "unbekannte Welt"
+                message.appendNewline().append(
+                    Component.text(" ● ", NamedTextColor.DARK_GRAY).append(
+                        Component.text(warp.name, Messages.HIGHLIGHT)
+                            .hoverEvent(HoverEvent.showText(
+                                Component.text("$worldName · %.0f, %.0f, %.0f".format(warp.x, warp.y, warp.z), Messages.TEXT)
+                                    .appendNewline()
+                                    .append(Component.text("Klicke zum Teleportieren", NamedTextColor.GREEN))
+                            ))
+                            .clickEvent(ClickEvent.runCommand("/warp teleport ${warp.name}"))
+                    )
+                )
+            }
+            player.sendMessage(message.build())
+        }
+    }
 }
 
-private fun infoLine(label: String, value: String): Component =
-    Component.text("$label: ", NamedTextColor.GRAY).append(Component.text(value, NamedTextColor.YELLOW))
+private fun validateName(name: String, warpManager: WarpManager): Component? = when {
+    name.isEmpty() ->
+        Component.text("Der Warp-Name darf nicht leer sein.")
+    name.length > MAX_NAME_LENGTH ->
+        Component.text("Der Warp-Name darf höchstens $MAX_NAME_LENGTH Zeichen lang sein.")
+    !NAME_REGEX.matches(name) ->
+        Component.text("Der Warp-Name darf nur Buchstaben, Zahlen, Leerzeichen, \"-\" und \"_\" enthalten.")
+    warpManager.getWarpByName(name) != null ->
+        Component.text("Ein Warp mit dem Namen ")
+            .append(Messages.highlight(name))
+            .append(Component.text(" existiert bereits."))
+    else -> null
+}
 
 private fun Argument<*>.warpNameArgument(
     warpManager: WarpManager,
@@ -101,7 +205,11 @@ private fun Argument<*>.withWarp(warpManager: WarpManager, handler: (Player, War
         val name = arguments["name"] as String
         val warp = warpManager.getWarpByName(name)
         if (warp == null) {
-            player.sendMessage(Component.text("Es gibt keinen Warp mit dem Namen \"$name\".", NamedTextColor.RED))
+            player.sendMessage(Messages.error(
+                Component.text("Es gibt keinen Warp mit dem Namen ")
+                    .append(Messages.highlight(name))
+                    .append(Component.text("."))
+            ))
             return@playerExecutor
         }
         handler(player, warp)
