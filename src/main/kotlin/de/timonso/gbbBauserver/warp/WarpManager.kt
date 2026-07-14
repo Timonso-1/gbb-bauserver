@@ -71,6 +71,38 @@ class WarpManager(private val plugin: JavaPlugin) {
         return warp
     }
 
+    fun moveWarp(warp: Warp, player: Player): Warp {
+        val location = player.location
+        val moved = warp.copy(
+            worldId = player.world.uid,
+            x = location.x,
+            y = location.y,
+            z = location.z,
+            yaw = location.yaw,
+            pitch = location.pitch
+        )
+        warps[moved.id] = moved
+
+        val section = config.getConfigurationSection("warps.${moved.id}") ?: config.createSection("warps.${moved.id}")
+        section.set("world", moved.worldId.toString())
+        section.set("x", moved.x)
+        section.set("y", moved.y)
+        section.set("z", moved.z)
+        section.set("yaw", moved.yaw)
+        section.set("pitch", moved.pitch)
+        config.save(file)
+
+        return moved
+    }
+
+    fun renameWarp(warp: Warp, newName: String): Warp {
+        val renamed = warp.copy(name = newName)
+        warps[renamed.id] = renamed
+        config.set("warps.${renamed.id}.name", renamed.name)
+        config.save(file)
+        return renamed
+    }
+
     fun deleteWarp(warp: Warp) {
         warps.remove(warp.id)
         config.set("warps.${warp.id}", null)
